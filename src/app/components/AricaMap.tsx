@@ -47,10 +47,22 @@ const getStatusText = (status: RoadSegment['status']): string => {
   }
 };
 
+const ARICA_WORK_AREA = {
+  south: -18.62,
+  west: -70.42,
+  north: -18.30,
+  east: -70.05,
+};
+
+const ARICA_WORK_BOUNDS = L.latLngBounds(
+  [ARICA_WORK_AREA.south, ARICA_WORK_AREA.west],
+  [ARICA_WORK_AREA.north, ARICA_WORK_AREA.east],
+);
+
 const isValidAricaCoordinate = ([lat, lng]: [number, number]): boolean => {
   return !isNaN(lat) && !isNaN(lng) &&
-         lat >= -18.55 && lat <= -18.40 &&
-         lng >= -70.38 && lng <= -70.20;
+         lat >= ARICA_WORK_AREA.south && lat <= ARICA_WORK_AREA.north &&
+         lng >= ARICA_WORK_AREA.west && lng <= ARICA_WORK_AREA.east;
 };
 
 const ARICA_CENTER: [number, number] = [-18.4870, -70.2890];
@@ -210,7 +222,12 @@ export const AricaMap = React.memo(function AricaMap({
     const map = L.map(mapContainerRef.current, {
       zoomControl: true,
       attributionControl: true,
+      maxBounds: ARICA_WORK_BOUNDS,
+      maxBoundsViscosity: 0.9,
+      minZoom: 10,
     }).setView(ARICA_CENTER, ARICA_INITIAL_ZOOM);
+
+    map.setMaxBounds(ARICA_WORK_BOUNDS);
 
     // Tile layer más detallado y optimizado (CartoDB Voyager)
     L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
