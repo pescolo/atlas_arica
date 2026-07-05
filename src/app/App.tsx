@@ -37,7 +37,46 @@ const metersBetween = ([lat1, lng1]: [number, number], [lat2, lng2]: [number, nu
   const lngMeters = (lng1 - lng2) * 111_320 * Math.cos(((lat1 + lat2) / 2) * Math.PI / 180);
   return Math.hypot(latMeters, lngMeters);
 };
+const distancePointToLineMeters = (point: [number, number], start: [number, number], end: [number, number]) => {
+  const avgLat = ((point[0] + start[0] + end[0]) / 3) * Math.PI / 180;
+  const toXY = ([lat, lng]: [number, number]) => ({
+    x: lng * 111_320 * Math.cos(avgLat),
+    y: lat * 111_320,
+  });
 
+  const p = toXY(point);
+  const a = toXY(start);
+  const b = toXY(end);
+  const dx = b.x - a.x;
+  const dy = b.y - a.y;
+  const lenSq = dx * dx + dy * dy;
+  if (lenSq === 0) return Math.hypot(p.x - a.x, p.y - a.y);
+
+  const t = Math.max(0, Math.min(1, ((p.x - a.x) * dx + (p.y - a.y) * dy) / lenSq));
+  const projected = { x: a.x + t * dx, y: a.y + t * dy };
+  return Math.hypot(p.x - projected.x, p.y - projected.y);
+};
+
+const distancePointToPathMeters = (point: [number, number], path: [number, number][]) => {
+  if (path.length === 0) return Number.POSITIVE_INFINITY;
+  if (path.length === 1) return metersBetween(point, path[0]);
+
+  return Math.min(...path.slice(1).map((coord, index) =>
+    distancePointToLineMeters(point, path[index], coord)
+  ));
+};
+
+const distancePathToPathMeters = (drawnPath: [number, number][], roadPath: [number, number][]) => {
+  return Math.min(...drawnPath.map(point => distancePointToPathMeters(point, roadPath)));
+};
+
+const getPathCenter = (coordinates: [number, number][]): [number, number] => {
+  if (coordinates.length === 0) return [-18.4755, -70.3120];
+  if (coordinates.length === 1) return coordinates[0];
+
+  const middleIndex = Math.floor(coordinates.length / 2);
+  return coordinates[middleIndex];
+};
 const getTodayKey = () => new Date().toISOString().split('T')[0];
 
 const formatDateKey = (dateKey: string, options?: Intl.DateTimeFormatOptions) => {
@@ -274,7 +313,74 @@ export default function App() {
   useEffect(() => {
     if (!canManageEvents) setEditMode(false);
   }, [canManageEvents]);
+const buildRoadAssociation = useCallback((coordinates: [number, number][], fallbackStreet = '') => {
+  const maxDistance = coordinates.length > 1 ? 180 : 120;
+  const nearbyRoads = streetReferences
+    .filter(street => street.coordinates.length > 0)
+    .map(street => ({
+      street,
+      distance: distancePathToPathMeters(coordinates, street.coordinates),
+    }))
+    .sort((a, b) => a.distance - b.distance)
+    .filter(item => item.distance <= maxDistance)
+    .slice(0, 5);
 
+  const roadNames = Array.from(new Set(nearbyRoads.map(item => item.street.street).filter(Boolean)));
+  const closestRoad = nearbyRoads[0]?.street;
+  const street = closestRoad?.street || fallbackStreet.trim() || 'Calle por asociar';
+  const sector = closestRoad?.sector || 'SECTOR CENTRO';
+
+  return {
+    street,
+    sector,
+    reference: coordinates.length > 1
+      ? roadNames.length > 0
+        ? `Tramo localizado cerca de ${roadNames.join(' / ')}`
+        : `Tramo localizado en ${street}`
+      : roadNames.length > 0
+        ? `Punto localizado cerca de ${roadNames[0]}`
+        : `Punto localizado en ${street}`,
+  };
+}, [streetReferences]);
+
+const resolveRoadAssociation = useCallback(async (coordinates: [number, number][], fallbackStreet = '') => {
+  const localAssociation = buildRoadAssociation(coordinates, fallbackStreet);
+  if (localAssociation.street !== 'Calle por asociar') return localAssociation;
+
+  const [lat, lng] = getPathCenter(coordinates);
+
+  try {
+    const response = await fetch(
+      `https://nominatim.openstreetmap.org/reverse?format=jsonv2&lat=${encodeURIComponent(lat)}&lon=${encodeURIComponent(lng)}&zoom=18&addressdetails=1`
+    );
+
+    if (!response.ok) return localAssociation;
+
+    const data = await response.json() as {
+      address?: {
+        road?: string;
+        pedestrian?: string;
+        residential?: string;
+        neighbourhood?: string;
+        suburb?: string;
+      };
+    };
+
+    const street = data.address?.road || data.address?.pedestrian || data.address?.residential;
+    if (!street) return localAssociation;
+
+    return {
+      ...localAssociation,
+      street,
+      sector: data.address?.neighbourhood || data.address?.suburb || localAssociation.sector,
+      reference: coordinates.length > 1
+        ? `Tramo localizado en ${street}`
+        : `Punto localizado en ${street}`,
+    };
+  } catch {
+    return localAssociation;
+  }
+}, [buildRoadAssociation]);
   const handleNewReport = useCallback(async (data: NewRoadEventInput) => {
     if (!canManageEvents) {
       alert('Tu cuenta no tiene permiso para agregar eventos viales.');
@@ -311,12 +417,12 @@ export default function App() {
         alert('No se pudieron subir las fotos. El reporte se guardará con las imágenes disponibles en este equipo.');
       }
     }
-
+    const roadAssociation = await resolveRoadAssociation([[start.lat, start.lng]], data.street);
     const newSegment: RoadSegment = {
       id: eventId,
       eventCode: `EV-${new Date().toISOString().slice(0, 10).replace(/-/g, '')}-${String(timestamp).slice(-4)}`,
-      street: data.street,
-      sector: data.sector,
+      street: roadAssociation.street,
+      sector: roadAssociation.sector || data.sector,
       status,
       date,
       priority,
@@ -327,7 +433,7 @@ export default function App() {
       image: photoUrls?.[0],
       photos: photoUrls ?? [],
       attachments: photoUrls ?? [],
-      locationReference: data.startReference || data.description || data.street,
+      locationReference: data.startReference || roadAssociation.reference || data.description || roadAssociation.street,
       history: [
         makeHistoryEntry(
           data.description ? `Reporte creado: ${data.description}` : 'Reporte creado',
@@ -481,6 +587,7 @@ export default function App() {
     }
 
     const timestamp = Date.now();
+    const roadAssociation = await resolveRoadAssociation(coordinates);
 
     const drawnLength = coordinates.length > 1 ? metersBetween(coordinates[0], coordinates[coordinates.length - 1]) : 0;
     const length = coordinates.length > 1 ? Math.max(1, Math.round(drawnLength)) : 1;
@@ -490,13 +597,13 @@ export default function App() {
       id: `custom-${timestamp}`,
       eventCode: `EV-${new Date().toISOString().slice(0, 10).replace(/-/g, '')}-${String(timestamp).slice(-4)}`,
       street: 'Calle por asociar',
-      sector: 'SECTOR CENTRO',
-      status: 'critical',
+      street: roadAssociation.street,
+      sector: roadAssociation.sector,
       date: getTodayKey(),
       priority,
       coordinates,
       damageType: coordinates.length > 1 ? 'Tramo deteriorado dibujado' : 'Bache reportado',
-      locationReference: coordinates.length > 1 ? 'Tramo dibujado en mapa' : 'Punto marcado en mapa',
+      locationReference: roadAssociation.reference,
       length,
       width,
       history: [
@@ -517,7 +624,7 @@ export default function App() {
     });
     setSelectedSegment(newSegment);
     setMapFocusRequest(null);
-  }, [canManageEvents]);
+  }, [canManageEvents, resolveRoadAssociation]);
 
   const handleDeleteSegment = useCallback((segmentId: string) => {
     if (!canManageEvents) {
