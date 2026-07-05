@@ -25,10 +25,10 @@ let streetCache: StreetReference[] | null = null;
 const STORAGE_KEY = 'atlas-arica-events-v1';
 const OSM_REQUEST_TIMEOUT_MS = 7000;
 const ARICA_BBOX = {
-  south: -18.515,
-  west: -70.335,
-  north: -18.445,
-  east: -70.255,
+  south: -18.62,
+  west: -70.42,
+  north: -18.30,
+  east: -70.05,
 };
 
 const isAricaUrbanCoordinate = ([lat, lng]: [number, number]): boolean => {
